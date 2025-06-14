@@ -3,7 +3,6 @@ package ggml
 // #cgo CXXFLAGS: -std=c++17
 // #cgo CPPFLAGS: -DNDEBUG -DGGML_USE_CPU
 // #cgo CPPFLAGS: -I${SRCDIR}/../include -I${SRCDIR}/ggml-cpu
-// #cgo windows CFLAGS: -Wno-dll-attribute-on-redeclaration
 // #cgo windows LDFLAGS: -lmsvcrt -static -static-libgcc -static-libstdc++
 // #include <stdlib.h>
 // #include "ggml-backend.h"
@@ -94,7 +93,32 @@ var OnceLoad = sync.OnceFunc(func() {
 				slog.Debug("ggml backend load all from path", "path", abspath)
 				cpath := C.CString(abspath)
 				defer C.free(unsafe.Pointer(cpath))
-				C.ggml_backend_load_all_from_path(cpath)
+				//获取当前程序路径
+				exePath, err := os.Executable()
+				if err == nil {
+                    baseDir := filepath.Dir(exePath)
+                    //fmt.Fprintln(os.Stderr, "[llama] 进入初始化...")
+                    if (os.Getenv("OLLAMA_ENGINE") == "llamarunner") {
+                        fmt.Fprintln(os.Stderr, "[llama] 启用llamarunner...")
+                        switch {
+                            case os.Getenv("GGML_USE_VULKAN") == "1":
+                                dllPath := filepath.Join(baseDir, "lib", "ollama", "vulkan")
+                                cpath := C.CString(dllPath)
+                                C.ggml_backend_load_all_from_path(cpath)
+                            case os.Getenv("GGML_USE_HIP") == "1":
+                                dllPath := filepath.Join(baseDir, "lib", "ollama", "rocm")
+                                cpath := C.CString(dllPath)
+                                C.ggml_backend_load_all_from_path(cpath)
+                            default:
+                                dllPath := filepath.Join(baseDir, "lib", "ollama", "rocm")
+                                cpath := C.CString(dllPath)
+                                C.ggml_backend_load_all_from_path(cpath)
+                        }
+                    } else {
+				        C.ggml_backend_load_all_from_path(cpath)
+                    }
+
+                }
 			}()
 
 			visited[abspath] = struct{}{}

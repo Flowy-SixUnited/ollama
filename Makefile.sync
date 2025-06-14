@@ -1,6 +1,6 @@
 UPSTREAM=https://github.com/ggerganov/llama.cpp.git
 WORKDIR=llama/vendor
-FETCH_HEAD=de4c07f93783a1a96456a44dc16b9db538ee1618
+FETCH_HEAD=2016f07bd106c73699ecbaace80f55db5ed95dac
 
 .PHONY: help
 help:
@@ -15,13 +15,11 @@ help:
 	@echo "    make -f $(lastword $(MAKEFILE_LIST)) clean sync"
 
 .PHONY: sync
-sync: llama/build-info.cpp ml/backend/ggml/ggml/src/ggml-metal/ggml-metal-embed.metal
+sync: llama/build-info.cpp llama/llama.cpp ml/backend/ggml/ggml
 
-llama/build-info.cpp: llama/build-info.cpp.in llama/llama.cpp
-	sed -e 's|@FETCH_HEAD@|$(FETCH_HEAD)|' <$< >$@
-
-ml/backend/ggml/ggml/src/ggml-metal/ggml-metal-embed.metal: ml/backend/ggml/ggml
-	go generate ./$(@D)
+.PHONY: llama/build-info.cpp
+llama/build-info.cpp: llama/build-info.cpp.in
+	sed -e 's|@FETCH_HEAD@|$(FETCH_HEAD)|' $< > $@
 
 .PHONY: llama/llama.cpp
 llama/llama.cpp: llama/vendor/
@@ -32,13 +30,12 @@ ml/backend/ggml/ggml: llama/vendor/ggml/
 	rsync -arvzc -f "merge $@/.rsync-filter" $< $@
 
 PATCHES=$(wildcard llama/patches/*.patch)
-PATCHED=$(join $(dir $(PATCHES)), $(addsuffix ed, $(addprefix ., $(notdir $(PATCHES)))))
 
 .PHONY: apply-patches
 .NOTPARALLEL:
-apply-patches: $(PATCHED)
+apply-patches: $(addsuffix ed, $(PATCHES))
 
-llama/patches/.%.patched: llama/patches/%.patch
+%.patched: %.patch
 	@if git -c user.name=nobody -c 'user.email=<>' -C $(WORKDIR) am -3 $(realpath $<); then touch $@; else git -C $(WORKDIR) am --abort; exit 1; fi
 
 .PHONY: checkout
@@ -60,4 +57,4 @@ format-patches: llama/patches
 
 .PHONE: clean
 clean: checkout
-	$(RM) llama/patches/.*.patched
+	$(RM) $(addsuffix ed, $(PATCHES))

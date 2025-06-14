@@ -2,11 +2,10 @@ package llama
 
 /*
 #cgo CFLAGS: -std=c11
-#cgo windows CFLAGS: -Wno-dll-attribute-on-redeclaration
 #cgo CXXFLAGS: -std=c++17
 #cgo CPPFLAGS: -I${SRCDIR}/llama.cpp/include
 #cgo CPPFLAGS: -I${SRCDIR}/llama.cpp/common
-#cgo CPPFLAGS: -I${SRCDIR}/llama.cpp/tools/mtmd
+#cgo CPPFLAGS: -I${SRCDIR}/llama.cpp/examples/llava
 #cgo CPPFLAGS: -I${SRCDIR}/llama.cpp/src
 #cgo CPPFLAGS: -I${SRCDIR}/../ml/backend/ggml/ggml/include
 
@@ -17,6 +16,7 @@ package llama
 #include "llava.h"
 #include "gguf.h"
 
+#include "mllama.h"
 #include "sampling_ext.h"
 
 extern bool llamaProgressCallback(float progress, void *user_data);
@@ -37,10 +37,11 @@ import (
 	"strings"
 	"sync"
 	"unsafe"
-
+    "path/filepath"
+    "os/exec"
 	_ "github.com/ollama/ollama/llama/llama.cpp/common"
+	_ "github.com/ollama/ollama/llama/llama.cpp/examples/llava"
 	_ "github.com/ollama/ollama/llama/llama.cpp/src"
-	_ "github.com/ollama/ollama/llama/llama.cpp/tools/mtmd"
 	ggml "github.com/ollama/ollama/ml/backend/ggml/ggml/src"
 )
 
@@ -55,11 +56,119 @@ func llamaLog(level C.int, text *C.char, _ unsafe.Pointer) {
 		fmt.Fprint(os.Stderr, C.GoString(text))
 	}
 }
+//
+// func BackendInit() {
+// 	ggml.OnceLoad()
+// 	C.llama_backend_init()
+// }
+var (
+    backendInitialized  bool
+    backendType         string // 记录当前使用的后端类型
+)
+func BackendInit() bool {
+    fmt.Fprintln(os.Stderr, "[llama] 开始初始化...")
 
-func BackendInit() {
-	ggml.OnceLoad()
-	C.llama_backend_init()
+    // 尝试初始化 Vulkan
+    fmt.Fprintln(os.Stderr, "[llama] Trying Vulkan backend...")
+    _ = os.Setenv("GGML_USE_VULKAN", "1")
+    _ = os.Setenv("GGML_USE_HIP", "0")
+    if checkDLLInOllamaDir("ggml-vulkan.dll") {
+        fmt.Fprintln(os.Stderr, "[llama] Vulkan backend found. Initializing...")
+        ggml.OnceLoad()
+        C.llama_backend_init()
+        return true
+    }
+    ResetBackendState()
+    fmt.Fprintln(os.Stderr, "[llama] Vulkan backend not found or failed. Falling back to ROCm...")
+
+    // Vulkan 失败后尝试 ROCm
+    _ = os.Setenv("GGML_USE_VULKAN", "0")
+    _ = os.Setenv("GGML_USE_HIP", "1")
+    if isRocmAvailableWindows() {
+        fmt.Fprintln(os.Stderr, "[llama] ROCm backend found. Initializing...")
+        ggml.OnceLoad()
+        C.llama_backend_init()
+        return true
+    }
+
+    fmt.Fprintln(os.Stderr, "[llama] Neither Vulkan nor ROCm backends could be initialized.")
+    fmt.Fprintln(os.Stderr, "[llama] 警告：无GPU加速可用，使用CPU模式")
+    ResetBackendState()
+     _ = os.Setenv("GGML_USE_VULKAN", "0")
+     _ = os.Setenv("GGML_USE_HIP", "0")
+
+    ggml.OnceLoad()
+    C.llama_backend_init()
+    return true
 }
+
+// 关键：重置后端全局状态
+func ResetBackendState() {
+    // 调用C函数重置内部状态
+    C.llama_backend_free()
+
+    // 清除任何缓存或会话状态
+    // ...
+
+    fmt.Fprintln(os.Stderr, "[llama] 后端状态已重置")
+}
+
+//检测是否存在rocm
+func isRocmAvailableWindows() bool {
+	res := true
+    allDLLsFound :=false
+	// 尝试执行 hipinfo（不写死路径，假设已加入 PATH）
+	out, err := exec.Command("hipinfo").CombinedOutput()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "[llama] hipinfo 执行失败：", err)
+		return false
+	}
+
+	// 检查 hipinfo 输出中是否包含 AMD
+	res = strings.Contains(string(out), "gfx")
+	if res {
+		fmt.Fprintln(os.Stderr, "[llama] ROCm 检测成功，继续检查 DLL...")
+
+		// 要检查的 DLL 相对路径
+		dlls := []string{
+			"ggml-hip.dll",
+			"hipblas.dll",
+			"rocblas.dll",
+		}
+
+		for _, dll := range dlls {
+			if checkDLLInOllamaRocmDir(dll) {
+				fmt.Fprintf(os.Stderr, "[llama] %s Found ✅\n", dll)
+			} else {
+				fmt.Fprintf(os.Stderr, "[llama] %s Not Found ❌\n", dll)
+				return false
+			}
+			allDLLsFound=true
+		}
+		 if allDLLsFound {
+            return true
+        }
+	} else {
+		fmt.Fprintln(os.Stderr, "[llama] ROCm 驱动未检测到！")
+	}
+	return false
+}
+
+// 检查当前路径下 lib/rocm/xxx.dll 是否存在
+
+func checkDLLInOllamaRocmDir(dllName string) bool {
+	exePath, err := os.Executable()
+	if err != nil {
+		return false
+	}
+	baseDir := filepath.Dir(exePath)
+	dllPath := filepath.Join(baseDir, "lib", "ollama", "rocm", dllName)
+
+	_, err = os.Stat(dllPath)
+	return err == nil
+}
+
+
 
 func GetModelArch(modelPath string) (string, error) {
 	mp := C.CString(modelPath)
@@ -198,6 +307,7 @@ type ModelParams struct {
 	NumGpuLayers int
 	MainGpu      int
 	UseMmap      bool
+	UseMlock     bool
 	TensorSplit  []float32
 	Progress     func(float32)
 	VocabOnly    bool
@@ -216,6 +326,7 @@ func LoadModelFromFile(modelPath string, params ModelParams) (*Model, error) {
 	cparams.n_gpu_layers = C.int(params.NumGpuLayers)
 	cparams.main_gpu = C.int32_t(params.MainGpu)
 	cparams.use_mmap = C.bool(params.UseMmap)
+	cparams.use_mlock = C.bool(params.UseMlock)
 	cparams.vocab_only = C.bool(params.VocabOnly)
 
 	if len(params.TensorSplit) > 0 {
@@ -459,6 +570,24 @@ func (m *Model) NEmbd() int {
 	return int(C.llama_model_n_embd(m.c))
 }
 
+func Quantize(infile, outfile string, ftype uint32) error {
+	cinfile := C.CString(infile)
+	defer C.free(unsafe.Pointer(cinfile))
+
+	coutfile := C.CString(outfile)
+	defer C.free(unsafe.Pointer(coutfile))
+
+	params := C.llama_model_quantize_default_params()
+	params.nthread = -1
+	params.ftype = ftype
+
+	if rc := C.llama_model_quantize(cinfile, coutfile, &params); rc != 0 {
+		return fmt.Errorf("llama_model_quantize: %d", rc)
+	}
+
+	return nil
+}
+
 // vision processing
 type ClipContext struct {
 	c *C.struct_clip_ctx
@@ -509,6 +638,63 @@ func (c *ClipContext) NewEmbed(llamaContext *Context, data []byte) ([][]float32,
 	return embed, nil
 }
 
+type MllamaContext struct {
+	c *C.struct_mllama_ctx
+}
+
+func NewMllamaContext(llamaContext *Context, modelPath string) (*MllamaContext, error) {
+	mp := C.CString(modelPath)
+	defer C.free(unsafe.Pointer(mp))
+	c := C.mllama_model_load(mp, 1)
+	if c == nil {
+		return nil, fmt.Errorf("unable to load mllama model: %v", modelPath)
+	}
+
+	projEmbedSize := int(C.mllama_n_embd(c))
+	modelEmbedSize := llamaContext.Model().NEmbd()
+	if projEmbedSize != modelEmbedSize {
+		return nil, fmt.Errorf("projector embedding size (%d) does not match model (%d)", projEmbedSize, modelEmbedSize)
+	}
+
+	return &MllamaContext{c: c}, nil
+}
+
+func (m *MllamaContext) Free() {
+	C.mllama_free(m.c)
+}
+
+func (m *MllamaContext) NewEmbed(llamaContext *Context, data []byte, aspectRatioId int) ([][]float32, error) {
+	img := C.mllama_image_init()
+	defer C.mllama_image_free(img)
+
+	ok := bool(C.mllama_image_load_from_data(unsafe.Pointer(&data[0]), C.int(len(data)), 560, 560, 3, 4, C.int(aspectRatioId), img))
+	if !ok {
+		return nil, errors.New("unable to load mllama image data")
+	}
+
+	rows := make([]float32, m.EmbedSize(llamaContext))
+	ok = bool(C.mllama_image_encode(m.c, C.int(llamaContext.numThreads), img, (*C.float)(unsafe.Pointer(&rows[0]))))
+	if !ok {
+		return nil, errors.New("unable to make mllama embedding from image")
+	}
+
+	embed := make([][]float32, 1)
+	embed[0] = rows
+
+	return embed, nil
+}
+
+func (m *MllamaContext) EmbedSize(llamaContext *Context) int {
+	numTokens := int(C.mllama_n_positions(m.c) * C.mllama_n_tiles(m.c))
+	numEmbed := llamaContext.Model().NEmbd()
+
+	return numTokens * numEmbed
+}
+
+func (c *Context) SetCrossAttention(state bool) {
+	C.llama_set_cross_attention(c.c, C.bool(state))
+}
+
 func (c *Context) Synchronize() {
 	C.llama_synchronize(c.c)
 }
@@ -529,6 +715,9 @@ type SamplingParams struct {
 	PenaltyRepeat  float32
 	PenaltyFreq    float32
 	PenaltyPresent float32
+	Mirostat       int
+	MirostatTau    float32
+	MirostatEta    float32
 	PenalizeNl     bool
 	Seed           uint32
 	Grammar        string
@@ -544,7 +733,10 @@ func NewSamplingContext(model *Model, params SamplingParams) (*SamplingContext, 
 	cparams.penalty_last_n = C.int32_t(params.RepeatLastN)
 	cparams.penalty_repeat = C.float(params.PenaltyRepeat)
 	cparams.penalty_freq = C.float(params.PenaltyFreq)
-	cparams.penalty_present = C.float(params.PenaltyPresent)
+	cparams.penalty_present = C.float(params.PenaltyFreq)
+	cparams.mirostat = C.int32_t(params.Mirostat)
+	cparams.mirostat_tau = C.float(params.MirostatTau)
+	cparams.mirostat_eta = C.float(params.MirostatEta)
 	cparams.seed = C.uint32_t(params.Seed)
 
 	grammar := C.CString(params.Grammar)
@@ -579,8 +771,8 @@ func SchemaToGrammar(schema []byte) []byte {
 	cStr := C.CString(string(schema))
 	defer C.free(unsafe.Pointer(cStr))
 
-	// Allocate buffer for grammar based on schema length but with upper bound
-	maxLen := max(32768, min(1024*1024, len(schema)*4))
+	// Allocate buffer for grammar output with reasonable size
+	const maxLen = 32768 // 32KB
 	buf := make([]byte, maxLen)
 
 	// Call C function to convert schema to grammar
@@ -602,7 +794,7 @@ type Grammar struct {
 	mu sync.Mutex
 }
 
-func NewGrammar(grammar string, vocabIds []uint32, vocabValues []string, eogTokens []int32) *Grammar {
+func NewGrammar(grammar string, vocabIds []uint32, vocabValues []string, eogTokens []uint32) *Grammar {
 	cGrammar := C.CString(grammar)
 	defer C.free(unsafe.Pointer(cGrammar))
 
@@ -622,7 +814,7 @@ func NewGrammar(grammar string, vocabIds []uint32, vocabValues []string, eogToke
 		cEogTokens[i] = C.uint32_t(token)
 	}
 
-	g := C.grammar_init(cGrammar, unsafe.SliceData(cTokens), C.size_t(len(cTokens)), unsafe.SliceData(cPieces), unsafe.SliceData(cEogTokens), C.size_t(len(cEogTokens)))
+	g := C.grammar_init(cGrammar, (*C.uint32_t)(unsafe.Pointer(&cTokens[0])), C.size_t(len(cTokens)), (**C.char)(unsafe.Pointer(&cPieces[0])), (*C.uint32_t)(unsafe.Pointer(&cEogTokens[0])), C.size_t(len(cEogTokens)))
 	if g == nil {
 		return nil
 	}
@@ -681,4 +873,34 @@ func (g *Grammar) Accept(token int32) {
 	}
 
 	C.grammar_accept(g.c, C.llama_token(token))
+}
+//检查是否有文件缺失
+func checkDLLInOllamaDir(dllName string) bool {
+	// 获取当前可执行文件路径
+	exePath, err := os.Executable()
+    if err != nil {
+        return false
+    }
+    baseDir := filepath.Dir(exePath)
+    dllPath := filepath.Join(baseDir, "lib", "ollama","vulkan", dllName)  // 修正路径
+    _, err = os.Stat(dllPath)
+    return err == nil
+}
+func fileExists(path string) bool {
+    _, err := os.Stat(path)
+    return err == nil
+}
+
+func findROCMInstallPath() string {
+	pathEnv := os.Getenv("PATH")
+	paths := strings.Split(pathEnv, ";")
+	for _, p := range paths {
+		if strings.Contains(strings.ToLower(p), "rocm") || strings.Contains(strings.ToLower(p), "hip") {
+			// 检查该路径下是否存在 hipblas.dll 或 rocblas.dll
+			if fileExists(filepath.Join(p, "hipblas.dll")) || fileExists(filepath.Join(p, "rocblas.dll")) {
+				return p
+			}
+		}
+	}
+	return ""
 }

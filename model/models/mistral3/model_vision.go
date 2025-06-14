@@ -110,8 +110,15 @@ func (m *VisionModel) positionalEmbedding(ctx ml.Context, positionIDs ml.Tensor)
 		}
 	}
 
-	h := ctx.Input().FromFloatSlice(frequenciesHeight, maxPatchesPerSide, frequencies/2)
-	w := ctx.Input().FromFloatSlice(frequenciesWidth, maxPatchesPerSide, frequencies/2)
+	h, err := ctx.Input().FromFloatSlice(frequenciesHeight, maxPatchesPerSide, frequencies/2)
+	if err != nil {
+		panic(err)
+	}
+
+	w, err := ctx.Input().FromFloatSlice(frequenciesWidth, maxPatchesPerSide, frequencies/2)
+	if err != nil {
+		panic(err)
+	}
 
 	h = h.Permute(ctx, 1, 0, 2, 3).Contiguous(ctx)
 	w = w.Permute(ctx, 1, 0, 2, 3).Contiguous(ctx)
@@ -144,7 +151,10 @@ func (m *VisionModel) Forward(ctx ml.Context, pixelValues ml.Tensor) ml.Tensor {
 		}
 	}
 
-	positionIDs := ctx.Input().FromIntSlice(positions, len(positions))
+	positionIDs, err := ctx.Input().FromIntSlice(positions, len(positions))
+	if err != nil {
+		panic(err)
+	}
 
 	positionEmbedding := m.positionalEmbedding(ctx, positionIDs)
 	cos, sin := positionEmbedding.Cos(ctx), positionEmbedding.Sin(ctx)
@@ -160,7 +170,7 @@ func (m *VisionModel) Forward(ctx ml.Context, pixelValues ml.Tensor) ml.Tensor {
 
 func newVisionModel(c fs.Config) *VisionModel {
 	return &VisionModel{
-		Layers: make([]VisionEncoderLayer, c.Uint("vision.block_count")),
+		Layers: make([]VisionEncoderLayer, c.Uint("vision.block_count", 24)),
 		VisionModelOptions: &VisionModelOptions{
 			hiddenSize:       int(c.Uint("vision.embedding_length", 1024)),
 			numHeads:         int(c.Uint("vision.attention.head_count", 16)),

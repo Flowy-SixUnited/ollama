@@ -60,16 +60,12 @@ func New(c fs.Config) (model.Model, error) {
 				Values: c.Strings("tokenizer.ggml.tokens"),
 				Scores: c.Floats("tokenizer.ggml.scores"),
 				Types:  c.Ints("tokenizer.ggml.token_type"),
+				BOS:    int32(c.Uint("tokenizer.ggml.bos_token_id")),
 				AddBOS: c.Bool("tokenizer.ggml.add_bos_token", true),
-				BOS:    []int32{int32(c.Uint("tokenizer.ggml.bos_token_id"))},
+				EOS:    int32(1),
 				AddEOS: c.Bool("tokenizer.ggml.add_eos_token", false),
-				EOS: append(
-					[]int32{
-						int32(c.Uint("tokenizer.ggml.eos_token_id")),
-						int32(c.Uint("tokenizer.ggml.eot_token_id", 106)),
-					},
-					c.Ints("tokenizer.ggml.eos_token_ids")...,
-				),
+				EOT:    int32(106),
+				AddEOT: c.Bool("tokenizer.ggml.add_eot_token", false),
 			},
 		),
 		ImageProcessor: newImageProcessor(c),
@@ -86,7 +82,7 @@ func New(c fs.Config) (model.Model, error) {
 	return &m, nil
 }
 
-func (m *Model) EncodeMultimodal(ctx ml.Context, multimodalData []byte) ([]input.Multimodal, error) {
+func (m *Model) EncodeMultimodal(ctx ml.Context, multimodalData []byte) (any, error) {
 	if len(m.VisionModel.Layers) == 0 {
 		return nil, model.ErrNoVisionModel
 	}
@@ -101,30 +97,33 @@ func (m *Model) EncodeMultimodal(ctx ml.Context, multimodalData []byte) ([]input
 		return nil, err
 	}
 
-	pixelValues := ctx.Input().FromFloatSlice(f32s,
+	pixelValues, err := ctx.Input().FromFloatSlice(f32s,
 		m.ImageProcessor.imageSize,
 		m.ImageProcessor.imageSize,
 		m.ImageProcessor.numChannels,
 	)
+	if err != nil {
+		return nil, err
+	}
 
 	visionOutputs := m.VisionModel.Forward(ctx, pixelValues)
 	visionOutputs = m.MultiModalProjector.Forward(ctx, visionOutputs, m.imageSize, m.patchSize, m.VisionModel.eps)
-	return []input.Multimodal{{Tensor: visionOutputs}}, nil
+	return visionOutputs, nil
 }
 
 func (m *Model) PostTokenize(inputs []input.Input) ([]input.Input, error) {
 	var result []input.Input
 
 	for _, inp := range inputs {
-		if len(inp.Multimodal) == 0 {
+		if inp.Multimodal == nil {
 			result = append(result, inp)
 		} else {
-			inputMultimodal := inp.Multimodal[0].Tensor
+			inputMultimodal := inp.Multimodal.(ml.Tensor)
 
 			result = append(result,
-				input.Input{Token: 108, SameBatch: inputMultimodal.Dim(1) + 3}, // "\n\n"
-				input.Input{Token: 255999},                                     // "<start_of_image>""
-				input.Input{Multimodal: []input.Multimodal{{Tensor: inputMultimodal}}, MultimodalHash: inp.MultimodalHash}, // image data is on the first placeholder
+				input.Input{Token: 108, SameBatch: inputMultimodal.Dim(1) + 3},               // "\n\n"
+				input.Input{Token: 255999},                                                   // "<start_of_image>""
+				input.Input{Multimodal: inputMultimodal, MultimodalHash: inp.MultimodalHash}, // image data is on the first placeholder
 			)
 
 			// add image token placeholders
@@ -141,8 +140,15 @@ func (m *Model) PostTokenize(inputs []input.Input) ([]input.Input, error) {
 }
 
 func (m *Model) Forward(ctx ml.Context, batch input.Batch) (ml.Tensor, error) {
-	positions := ctx.Input().FromIntSlice(batch.Positions, len(batch.Positions))
-	outputs := ctx.Input().FromIntSlice(batch.Outputs, len(batch.Outputs))
+	positions, err := ctx.Input().FromIntSlice(batch.Positions, len(batch.Positions))
+	if err != nil {
+		return nil, err
+	}
+
+	outputs, err := ctx.Input().FromIntSlice(batch.Outputs, len(batch.Outputs))
+	if err != nil {
+		return nil, err
+	}
 
 	return m.TextModel.Forward(ctx, batch.Inputs, positions, outputs, batch, m.Cache), nil
 }

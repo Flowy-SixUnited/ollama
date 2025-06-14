@@ -208,7 +208,7 @@ func (m *VisionModel) Forward(ctx ml.Context, pixelValues ml.Tensor) ml.Tensor {
 	}
 
 	hiddenStates = m.LayerNormPost.Forward(ctx, hiddenStates, m.eps)
-	hiddenStates = hiddenStates.Pad(ctx, 0, -1, 0, 0)
+	hiddenStates = hiddenStates.Unpad(ctx, 0, 1, 0, 0)
 	hiddenStates = m.VisionAdapter.Forward(ctx, hiddenStates, m.VisionOptions)
 	return hiddenStates
 }
@@ -245,7 +245,10 @@ func (m *VisionModel) rotaryEmbedding(ctx ml.Context) (ml.Tensor, ml.Tensor) {
 		}
 	}
 
-	ropeFreqs := ctx.Input().FromFloatSlice(freqs, freqDim/2, numPatches, 2)
+	ropeFreqs, err := ctx.Input().FromFloatSlice(freqs, freqDim/2, numPatches, 2)
+	if err != nil {
+		panic(err)
+	}
 
 	ropeFreqs = ropeFreqs.Permute(ctx, 0, 2, 1, 3).Contiguous(ctx)
 	ropeFreqs = ropeFreqs.Reshape(ctx, freqDim, 1, numPatches)

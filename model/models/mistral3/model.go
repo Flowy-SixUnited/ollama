@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"image"
 	"slices"
+	"sync"
 
 	"github.com/ollama/ollama/fs"
 	"github.com/ollama/ollama/kvcache"
@@ -15,8 +16,6 @@ import (
 
 type Model struct {
 	model.Base
-	model.BytePairEncoding
-
 	*TextModel
 	*VisionModel         `gguf:"v,vision"`
 	*MultiModalProjector `gguf:"mm"`
@@ -31,23 +30,13 @@ var _ model.MultimodalProcessor = (*Model)(nil)
 var _ model.TextProcessor = (*Model)(nil)
 
 func New(c fs.Config) (model.Model, error) {
+	textModel, err := NewTextModel(c)
+	if err != nil {
+		return nil, err
+	}
+
 	m := &Model{
-		BytePairEncoding: model.NewBytePairEncoding(
-			c.String("tokenizer.ggml.pretokenizer", `[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]*[\p{Ll}\p{Lm}\p{Lo}\p{M}]+|[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+[\p{Ll}\p{Lm}\p{Lo}\p{M}]*|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n/]*|\s*[\r\n]+|\s+(?!\S)|\s+`),
-			&model.Vocabulary{
-				Values: c.Strings("tokenizer.ggml.tokens"),
-				Types:  c.Ints("tokenizer.ggml.token_type"),
-				Merges: c.Strings("tokenizer.ggml.merges"),
-				AddBOS: c.Bool("tokenizer.ggml.add_bos_token", true),
-				BOS:    []int32{int32(c.Uint("tokenizer.ggml.bos_token_id"))},
-				AddEOS: c.Bool("tokenizer.ggml.add_eos_token", false),
-				EOS: append(
-					[]int32{int32(c.Uint("tokenizer.ggml.eos_token_id"))},
-					c.Ints("tokenizer.ggml.eos_token_ids")...,
-				),
-			},
-		),
-		TextModel:           newTextModel(c),
+		TextModel:           textModel,
 		VisionModel:         newVisionModel(c),
 		ImageProcessor:      newImageProcessor(c),
 		MultiModalProjector: newMultiModalProjector(c),
@@ -99,7 +88,7 @@ func newMultiModalProjector(c fs.Config) *MultiModalProjector {
 	}
 }
 
-func (m *Model) EncodeMultimodal(ctx ml.Context, multimodalData []byte) ([]input.Multimodal, error) {
+func (m *Model) EncodeMultimodal(ctx ml.Context, multimodalData []byte) (any, error) {
 	if len(m.VisionModel.Layers) == 0 {
 		return nil, model.ErrNoVisionModel
 	}
@@ -114,18 +103,44 @@ func (m *Model) EncodeMultimodal(ctx ml.Context, multimodalData []byte) ([]input
 		return nil, err
 	}
 
-	pixelValues := ctx.Input().FromFloatSlice(f32s, size.X, size.Y, m.ImageProcessor.numChannels)
+	pixelValues, err := ctx.Input().FromFloatSlice(f32s, size.X, size.Y, m.ImageProcessor.numChannels)
+	if err != nil {
+		return nil, err
+	}
 
 	visionOutputs := m.VisionModel.Forward(ctx, pixelValues)
 	features, size := m.MultiModalProjector.Forward(ctx, visionOutputs, size)
 
 	// split into patches to be sent to the text transformer
-	rows := make([]input.Multimodal, size.Y)
+	parent := imageFeatures{tensor: features}
+	rows := make([]*imageRow, size.Y)
 	for i := range rows {
-		rows[i].Tensor = features.View(ctx, features.Stride(1)*size.X*i, features.Dim(0), features.Stride(1), size.X)
+		rows[i] = &imageRow{parent: &parent, s: i, shape: []int{features.Dim(0), size.X}}
 	}
 
 	return rows, nil
+}
+
+type imageFeatures struct {
+	tensor ml.Tensor
+
+	dataOnce sync.Once
+	data     []float32
+}
+
+type imageRow struct {
+	parent *imageFeatures
+	s      int
+	shape  []int
+}
+
+func (r *imageRow) data() []float32 {
+	n := 1
+	for _, s := range r.shape {
+		n *= s
+	}
+
+	return r.parent.data[r.s*n : (r.s+1)*n]
 }
 
 // PostTokenize arranges Mistral 3's inputs for the forward pass
@@ -136,14 +151,15 @@ func (m *Model) EncodeMultimodal(ctx ml.Context, multimodalData []byte) ([]input
 func (m *Model) PostTokenize(inputs []input.Input) ([]input.Input, error) {
 	var result []input.Input
 	for _, inp := range inputs {
-		if len(inp.Multimodal) == 0 {
+		if inp.Multimodal == nil {
 			result = append(result, inp)
 		} else {
-			for i, row := range inp.Multimodal {
+			inputMultimodal := inp.Multimodal.([]*imageRow)
+			for i, row := range inputMultimodal {
 				// [IMG]
-				result = append(result, input.Input{Token: 10, Multimodal: []input.Multimodal{{Tensor: row.Tensor}}, MultimodalHash: inp.MultimodalHash, SameBatch: row.Tensor.Dim(1)})
-				result = append(result, slices.Repeat([]input.Input{{Token: 10}}, row.Tensor.Dim(1)-1)...)
-				if i == len(inp.Multimodal)-1 {
+				result = append(result, input.Input{Token: 10, Multimodal: row, MultimodalHash: inp.MultimodalHash, SameBatch: row.shape[1]})
+				result = append(result, slices.Repeat([]input.Input{{Token: 10}}, row.shape[1]-1)...)
+				if i == len(inputMultimodal)-1 {
 					// [IMG_END]
 					result = append(result, input.Input{Token: 13})
 				} else {
@@ -158,8 +174,15 @@ func (m *Model) PostTokenize(inputs []input.Input) ([]input.Input, error) {
 }
 
 func (m *Model) Forward(ctx ml.Context, batch input.Batch) (ml.Tensor, error) {
-	positions := ctx.Input().FromIntSlice(batch.Positions, len(batch.Positions))
-	outputs := ctx.Input().FromIntSlice(batch.Outputs, len(batch.Outputs))
+	positions, err := ctx.Input().FromIntSlice(batch.Positions, len(batch.Positions))
+	if err != nil {
+		return nil, err
+	}
+
+	outputs, err := ctx.Input().FromIntSlice(batch.Outputs, len(batch.Outputs))
+	if err != nil {
+		return nil, err
+	}
 
 	return m.TextModel.Forward(ctx, batch.Inputs, positions, outputs, batch, m.Cache), nil
 }

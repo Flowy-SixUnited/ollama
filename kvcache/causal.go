@@ -211,9 +211,10 @@ func (c *Causal) StartForward(ctx ml.Context, batch input.Batch, reserve bool) e
 		c.curCellRange.max = len(c.cells) - 1
 	}
 
-	c.curMask = c.buildMask(ctx)
+	var err error
+	c.curMask, err = c.buildMask(ctx)
 
-	return nil
+	return err
 }
 
 func newRange() cellRange {
@@ -238,7 +239,7 @@ func (c *Causal) findStartLoc() (int, error) {
 		}
 	}
 
-	return 0, fmt.Errorf("%w (cache: %v batch: %v)", ErrKvCacheFull, len(c.cells), c.curBatchSize)
+	return 0, fmt.Errorf("%w (length: %v)", ErrKvCacheFull, len(c.cells))
 }
 
 func (c *Causal) updateSlidingWindow() {
@@ -296,7 +297,7 @@ func roundUp(length, pad int) int {
 // Builds a mask of history x batch indicating whether for each token in the batch the
 // token in the history should apply. This is based on both the sequence and causality (the
 // position of the history is not ahead of the token in the batch).
-func (c *Causal) buildMask(ctx ml.Context) ml.Tensor {
+func (c *Causal) buildMask(ctx ml.Context) (ml.Tensor, error) {
 	// Align and pad the two dimensions as required by the backend
 	batchSize := roundUp(c.curBatchSize, c.config.MaskBatchPadding)
 
@@ -324,7 +325,10 @@ func (c *Causal) buildMask(ctx ml.Context) ml.Tensor {
 		mask[i] = float32(math.Inf(-1))
 	}
 
-	maskTensor := ctx.Input().FromFloatSlice(mask, length, batchSize)
+	maskTensor, err := ctx.Input().FromFloatSlice(mask, length, batchSize)
+	if err != nil {
+		return nil, err
+	}
 
 	if c.config.MaskDType != ml.DTypeF32 {
 		out := ctx.Input().Empty(c.config.MaskDType, maskTensor.Shape()...)
@@ -332,7 +336,7 @@ func (c *Causal) buildMask(ctx ml.Context) ml.Tensor {
 		maskTensor = out
 	}
 
-	return maskTensor
+	return maskTensor, nil
 }
 
 func (c *Causal) moveCells(ctx ml.Context, src, dst, length int) {
@@ -487,7 +491,12 @@ func (c *Causal) SetCausal(ctx ml.Context, opts CausalOptions) {
 	if !slices.Equal(c.opts.Except, opts.Except) {
 		c.opts = opts
 		if ctx != nil {
-			c.curMask = c.buildMask(ctx)
+			var err error
+			c.curMask, err = c.buildMask(ctx)
+			if err != nil {
+				// This error should never occur because we have previously built a mask with the same shape
+				panic(fmt.Errorf("SetCausal: %w", err))
+			}
 		}
 	}
 }
@@ -643,7 +652,10 @@ func (c *Causal) shift(seq int, beginIndex, offset int32) error {
 		}
 	}
 
-	kShift := ctx.Input().FromIntSlice(offsets, len(offsets))
+	kShift, err := ctx.Input().FromIntSlice(offsets, len(offsets))
+	if err != nil {
+		return err
+	}
 
 	for i, key := range c.keys {
 		if key == nil {

@@ -3,6 +3,7 @@ package runner
 import (
 	"github.com/ollama/ollama/runner/llamarunner"
 	"github.com/ollama/ollama/runner/ollamarunner"
+	"os"
 )
 
 func Execute(args []string) error {
@@ -15,10 +16,12 @@ func Execute(args []string) error {
 		args = args[1:]
 		newRunner = true
 	}
-
+    //?????????????
 	if newRunner {
+	    _ = os.Setenv("OLLAMA_ENGINE", "ollamarunner")
 		return ollamarunner.Execute(args)
 	} else {
+	    _ = os.Setenv("OLLAMA_ENGINE", "llamarunner")
 		return llamarunner.Execute(args)
 	}
 }

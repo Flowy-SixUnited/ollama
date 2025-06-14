@@ -3,7 +3,6 @@ package server
 import (
 	"bytes"
 	"encoding/binary"
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -92,7 +91,11 @@ func createMockGGUFData(architecture string, vision bool) []byte {
 
 func TestModelCapabilities(t *testing.T) {
 	// Create a temporary directory for test files
-	tempDir := t.TempDir()
+	tempDir, err := os.MkdirTemp("", "model_capabilities_test")
+	if err != nil {
+		t.Fatalf("Failed to create temp directory: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
 
 	// Create different types of mock model files
 	completionModelPath := filepath.Join(tempDir, "model.bin")
@@ -101,13 +104,21 @@ func TestModelCapabilities(t *testing.T) {
 	// Create a simple model file for tests that don't depend on GGUF content
 	simpleModelPath := filepath.Join(tempDir, "simple_model.bin")
 
-	if err := errors.Join(
-		os.WriteFile(completionModelPath, createMockGGUFData("llama", false), 0o644),
-		os.WriteFile(visionModelPath, createMockGGUFData("llama", true), 0o644),
-		os.WriteFile(embeddingModelPath, createMockGGUFData("bert", false), 0o644),
-		os.WriteFile(simpleModelPath, []byte("dummy model data"), 0o644),
-	); err != nil {
-		t.Fatalf("Failed to create model files: %v", err)
+	err = os.WriteFile(completionModelPath, createMockGGUFData("llama", false), 0o644)
+	if err != nil {
+		t.Fatalf("Failed to create completion model file: %v", err)
+	}
+	err = os.WriteFile(visionModelPath, createMockGGUFData("llama", true), 0o644)
+	if err != nil {
+		t.Fatalf("Failed to create completion model file: %v", err)
+	}
+	err = os.WriteFile(embeddingModelPath, createMockGGUFData("bert", false), 0o644)
+	if err != nil {
+		t.Fatalf("Failed to create embedding model file: %v", err)
+	}
+	err = os.WriteFile(simpleModelPath, []byte("dummy model data"), 0o644)
+	if err != nil {
+		t.Fatalf("Failed to create simple model file: %v", err)
 	}
 
 	toolsInsertTemplate, err := template.Parse("{{ .prompt }}{{ if .tools }}{{ .tools }}{{ end }}{{ if .suffix }}{{ .suffix }}{{ end }}")
@@ -225,18 +236,27 @@ func TestModelCapabilities(t *testing.T) {
 
 func TestModelCheckCapabilities(t *testing.T) {
 	// Create a temporary directory for test files
-	tempDir := t.TempDir()
+	tempDir, err := os.MkdirTemp("", "model_check_capabilities_test")
+	if err != nil {
+		t.Fatalf("Failed to create temp directory: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
 
 	visionModelPath := filepath.Join(tempDir, "vision_model.bin")
 	simpleModelPath := filepath.Join(tempDir, "model.bin")
 	embeddingModelPath := filepath.Join(tempDir, "embedding_model.bin")
 
-	if err := errors.Join(
-		os.WriteFile(simpleModelPath, []byte("dummy model data"), 0o644),
-		os.WriteFile(visionModelPath, createMockGGUFData("llama", true), 0o644),
-		os.WriteFile(embeddingModelPath, createMockGGUFData("bert", false), 0o644),
-	); err != nil {
-		t.Fatalf("Failed to create model files: %v", err)
+	err = os.WriteFile(simpleModelPath, []byte("dummy model data"), 0o644)
+	if err != nil {
+		t.Fatalf("Failed to create simple model file: %v", err)
+	}
+	err = os.WriteFile(visionModelPath, createMockGGUFData("llama", true), 0o644)
+	if err != nil {
+		t.Fatalf("Failed to create vision model file: %v", err)
+	}
+	err = os.WriteFile(embeddingModelPath, createMockGGUFData("bert", false), 0o644)
+	if err != nil {
+		t.Fatalf("Failed to create embedding model file: %v", err)
 	}
 
 	toolsInsertTemplate, err := template.Parse("{{ .prompt }}{{ if .tools }}{{ .tools }}{{ end }}{{ if .suffix }}{{ .suffix }}{{ end }}")

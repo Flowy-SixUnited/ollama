@@ -7,8 +7,6 @@ import (
 	"github.com/ollama/ollama/kvcache"
 	"github.com/ollama/ollama/ml"
 	"github.com/ollama/ollama/ml/nn"
-	"github.com/ollama/ollama/ml/nn/fast"
-	"github.com/ollama/ollama/ml/nn/rope"
 	"github.com/ollama/ollama/model"
 	"github.com/ollama/ollama/model/input"
 )
@@ -45,13 +43,8 @@ func New(c fs.Config) (model.Model, error) {
 				Values: c.Strings("tokenizer.ggml.tokens"),
 				Scores: c.Floats("tokenizer.ggml.scores"),
 				Types:  c.Ints("tokenizer.ggml.token_type"),
-				AddBOS: c.Bool("tokenizer.ggml.add_bos_token", true),
-				BOS:    []int32{int32(c.Uint("tokenizer.ggml.bos_token_id"))},
-				AddEOS: c.Bool("tokenizer.ggml.add_eos_token", false),
-				EOS: append(
-					[]int32{int32(c.Uint("tokenizer.ggml.eos_token_id"))},
-					c.Ints("tokenizer.ggml.eos_token_ids")...,
-				),
+				BOS:    int32(c.Uint("tokenizer.ggml.bos_token_id")),
+				EOS:    int32(c.Uint("tokenizer.ggml.eos_token_id")),
 			},
 		),
 		Layers: make([]Layer, c.Uint("block_count")),
@@ -85,10 +78,11 @@ type SelfAttention struct {
 
 func (sa *SelfAttention) Forward(ctx ml.Context, hiddenState, positionIDs ml.Tensor, cache kvcache.Cache, opts *Options) ml.Tensor {
 	batchSize := hiddenState.Dim(1)
+	ropeType := uint32(2)
 
 	q := sa.Query.Forward(ctx, hiddenState)
 	q = q.Reshape(ctx, opts.attnKeyLen, opts.numHeads, batchSize)
-	q = fast.RoPE(ctx, q, positionIDs, opts.attnKeyLen, opts.ropeBase, opts.ropeScale, rope.WithTypeNeoX())
+	q = q.RoPE(ctx, positionIDs, nil, uint32(opts.attnKeyLen), ropeType, opts.ropeBase, opts.ropeScale)
 
 	if opts.largeModelScaling {
 		q = q.Scale(ctx, 1.0/math.Sqrt(float64(opts.hiddenSize/opts.numHeads)))
@@ -98,7 +92,7 @@ func (sa *SelfAttention) Forward(ctx ml.Context, hiddenState, positionIDs ml.Ten
 
 	k := sa.Key.Forward(ctx, hiddenState)
 	k = k.Reshape(ctx, opts.attnKeyLen, opts.numKVHeads, batchSize)
-	k = fast.RoPE(ctx, k, positionIDs, opts.attnKeyLen, opts.ropeBase, opts.ropeScale, rope.WithTypeNeoX())
+	k = k.RoPE(ctx, positionIDs, nil, uint32(opts.attnKeyLen), ropeType, opts.ropeBase, opts.ropeScale)
 
 	v := sa.Value.Forward(ctx, hiddenState)
 	v = v.Reshape(ctx, opts.attnValLen, opts.numKVHeads, batchSize)
@@ -128,7 +122,7 @@ func (sa *SelfAttention) Forward(ctx ml.Context, hiddenState, positionIDs ml.Ten
 }
 
 func (m *Model) Shift(ctx ml.Context, layer int, key, shift ml.Tensor) (ml.Tensor, error) {
-	return fast.RoPE(ctx, key, shift, m.Options.attnKeyLen, m.Options.ropeBase, m.Options.ropeScale, rope.WithTypeNeoX()), nil
+	return key.RoPE(ctx, shift, nil, uint32(m.Options.attnKeyLen), uint32(2), m.Options.ropeBase, m.Options.ropeScale), nil
 }
 
 type MLP struct {
@@ -175,8 +169,15 @@ func (l *Layer) Forward(ctx ml.Context, hiddenState, positionIDs, outputs ml.Ten
 }
 
 func (m *Model) Forward(ctx ml.Context, batch input.Batch) (ml.Tensor, error) {
-	positions := ctx.Input().FromIntSlice(batch.Positions, len(batch.Positions))
-	outputs := ctx.Input().FromIntSlice(batch.Outputs, len(batch.Outputs))
+	positions, err := ctx.Input().FromIntSlice(batch.Positions, len(batch.Positions))
+	if err != nil {
+		return nil, err
+	}
+
+	outputs, err := ctx.Input().FromIntSlice(batch.Outputs, len(batch.Outputs))
+	if err != nil {
+		return nil, err
+	}
 
 	hiddenState := m.TokenEmbedding.Forward(ctx, batch.Inputs)
 	hiddenState = hiddenState.Scale(ctx, math.Sqrt(float64(m.Options.hiddenSize)))

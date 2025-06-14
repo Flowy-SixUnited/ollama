@@ -11,26 +11,24 @@
 #include <vector>
 
 #ifdef GGML_USE_CPU_HBM
-#    include "ggml-cpu-hbm.h"
+#include "ggml-cpu-hbm.h"
 #endif
 
 #ifdef GGML_USE_CPU_KLEIDIAI
-#    include "kleidiai/kleidiai.h"
-#endif
-
-#if defined(_WIN32)
-#    define WIN32_LEAN_AND_MEAN
-#    ifndef NOMINMAX
-#        define NOMINMAX
-#    endif
-#    include <windows.h>
-#else
-#    include <unistd.h>
+#include "kleidiai/kleidiai.h"
 #endif
 
 #if defined(__APPLE__)
-#    include <sys/sysctl.h>
-#    include <sys/types.h>
+#include <sys/types.h>
+#include <sys/sysctl.h>
+#endif
+
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#ifndef NOMINMAX
+    #define NOMINMAX
+#endif
+#include <windows.h>
 #endif
 
 // ggml-backend interface
@@ -72,10 +70,8 @@ static ggml_backend_buffer_type_t * ggml_backend_cpu_device_get_extra_buffers_ty
 }
 
 static bool ggml_backend_cpu_is_extra_buffer_type(ggml_backend_buffer_type_t buft) {
-    for (auto * extra : ggml_backend_cpu_get_extra_buffers_type()) {
-        if (extra && extra == buft) {
-            return true;
-        }
+    for (auto extra : ggml_backend_cpu_get_extra_buffers_type()) {
+        if (extra && extra == buft) return true;
     }
     return false;
 }
@@ -334,18 +330,9 @@ static const char * ggml_backend_cpu_device_get_description(ggml_backend_dev_t d
 }
 
 static void ggml_backend_cpu_device_get_memory(ggml_backend_dev_t dev, size_t * free, size_t * total) {
-#ifdef _WIN32
-    MEMORYSTATUSEX status;
-    status.dwLength = sizeof(status);
-    GlobalMemoryStatusEx(&status);
-    *total = status.ullTotalPhys;
-    *free = status.ullAvailPhys;
-#else
-    long pages = sysconf(_SC_PHYS_PAGES);
-    long page_size = sysconf(_SC_PAGE_SIZE);
-    *total = pages * page_size;
-    *free = *total;
-#endif
+    // TODO
+    *free = 0;
+    *total = 0;
 
     GGML_UNUSED(dev);
 }

@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -22,10 +23,8 @@ import (
 	"golang.org/x/sync/semaphore"
 
 	"github.com/ollama/ollama/api"
-	"github.com/ollama/ollama/envconfig"
 	"github.com/ollama/ollama/llama"
 	"github.com/ollama/ollama/llm"
-	"github.com/ollama/ollama/logutil"
 	"github.com/ollama/ollama/runner/common"
 )
 
@@ -56,6 +55,10 @@ type Sequence struct {
 
 	// input cache being used by this sequence
 	cache *InputCacheSlot
+
+	// does this sequence require cross-attention layers to be processed? - if we have seen
+	// an image for certain multi-modal models
+	crossAttention bool
 
 	// channel to send responses over
 	responses chan string
@@ -201,7 +204,7 @@ func (s *Server) inputs(prompt string, images []llm.ImageData) ([]input, error) 
 				return nil, fmt.Errorf("invalid image index: %d", n)
 			}
 
-			embed, err := s.image.NewEmbed(s.lc, images[imageIndex].Data)
+			embed, err := s.image.NewEmbed(s.lc, images[imageIndex].Data, images[imageIndex].AspectRatioID)
 			if err != nil {
 				return nil, err
 			}
@@ -364,6 +367,7 @@ func (s *Server) processBatch(tokenBatch *llama.Batch, embedBatch *llama.Batch) 
 	defer s.mu.Unlock()
 
 	var batch *llama.Batch
+	crossAttention := false
 
 	seqIdx := s.nextSeq - 1
 	for range s.seqs {
@@ -411,8 +415,9 @@ func (s *Server) processBatch(tokenBatch *llama.Batch, embedBatch *llama.Batch) 
 					batch = tokenBatch
 				} else {
 					batch = embedBatch
+					seq.crossAttention = s.image.NeedCrossAttention(input)
 				}
-			} else if embedding != batch.IsEmbedding() {
+			} else if embedding != batch.IsEmbedding() || crossAttention != seq.crossAttention {
 				s.nextSeq = seqIdx
 				break
 			}
@@ -421,6 +426,7 @@ func (s *Server) processBatch(tokenBatch *llama.Batch, embedBatch *llama.Batch) 
 				break
 			}
 
+			crossAttention = seq.crossAttention
 			batch.Add(input.token, input.embed, len(seq.cache.Inputs)+len(seq.pendingInputs), i+1 == len(seq.inputs), seq.cache.Id)
 			seq.pendingInputs = append(seq.pendingInputs, input)
 			seq.iBatch = batch.NumTokens() - 1
@@ -433,9 +439,18 @@ func (s *Server) processBatch(tokenBatch *llama.Batch, embedBatch *llama.Batch) 
 		return nil
 	}
 
+	s.lc.SetCrossAttention(crossAttention)
+
 	err := s.lc.Decode(batch)
 	if err != nil {
 		return fmt.Errorf("failed to decode batch: %w", err)
+	}
+
+	if crossAttention {
+		// synchronize state to ensure the cross attention batch is complete.
+		// needed specifically for multi-GPU systems otherwise an inflight
+		// task may be incorrectly invalidated causing a crash
+		s.lc.Synchronize()
 	}
 
 	for i, seq := range s.seqs {
@@ -568,6 +583,9 @@ func (s *Server) completion(w http.ResponseWriter, r *http.Request) {
 		PenaltyRepeat:  req.Options.RepeatPenalty,
 		PenaltyFreq:    req.Options.FrequencyPenalty,
 		PenaltyPresent: req.Options.PresencePenalty,
+		Mirostat:       req.Options.Mirostat,
+		MirostatTau:    req.Options.MirostatTau,
+		MirostatEta:    req.Options.MirostatEta,
 		Seed:           uint32(req.Options.Seed),
 		Grammar:        req.Grammar,
 	}
@@ -605,6 +623,8 @@ func (s *Server) completion(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, fmt.Sprintf("Failed to load cache: %v", err), http.StatusInternalServerError)
 				return
 			}
+
+			seq.crossAttention = s.image.NeedCrossAttention(seq.cache.Inputs...)
 
 			s.seqs[i] = seq
 			s.cond.Signal()
@@ -662,6 +682,8 @@ func (s *Server) embeddings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+
+	slog.Debug("embedding request", "content", req.Content)
 
 	seq, err := s.NewSequence(req.Content, nil, NewSequenceParams{embedding: true})
 	if err != nil {
@@ -796,8 +818,9 @@ func Execute(args []string) error {
 	kvCacheType := fs.String("kv-cache-type", "", "quantization type for KV cache (default: f16)")
 	port := fs.Int("port", 8080, "Port to expose the server on")
 	threads := fs.Int("threads", runtime.NumCPU(), "Number of threads to use during generation")
-	_ = fs.Bool("verbose", false, "verbose output (default: disabled)")
+	verbose := fs.Bool("verbose", false, "verbose output (default: disabled)")
 	noMmap := fs.Bool("no-mmap", false, "do not memory-map model (slower load but may reduce pageouts if not using mlock)")
+	mlock := fs.Bool("mlock", false, "force system to keep model in RAM rather than swapping or compressing")
 	tensorSplit := fs.String("tensor-split", "", "fraction of the model to offload to each GPU, comma-separated list of proportions")
 	multiUserCache := fs.Bool("multiuser-cache", false, "optimize input cache algorithm for multiple users")
 
@@ -811,7 +834,22 @@ func Execute(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	slog.SetDefault(logutil.NewLogger(os.Stderr, envconfig.LogLevel()))
+	level := slog.LevelInfo
+	if *verbose {
+		level = slog.LevelDebug
+	}
+	handler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+		Level:     level,
+		AddSource: true,
+		ReplaceAttr: func(_ []string, attr slog.Attr) slog.Attr {
+			if attr.Key == slog.SourceKey {
+				source := attr.Value.Any().(*slog.Source)
+				source.File = filepath.Base(source.File)
+			}
+			return attr
+		},
+	})
+	slog.SetDefault(slog.New(handler))
 	slog.Info("starting go runner")
 
 	llama.BackendInit()
@@ -838,6 +876,7 @@ func Execute(args []string) error {
 		NumGpuLayers: *nGpuLayers,
 		MainGpu:      *mainGpu,
 		UseMmap:      !*noMmap && lpaths.String() == "",
+		UseMlock:     *mlock,
 		TensorSplit:  tensorSplitFloats,
 		Progress: func(progress float32) {
 			server.progress = progress

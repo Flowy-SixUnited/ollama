@@ -39,17 +39,7 @@ func (f Modelfile) String() string {
 	return sb.String()
 }
 
-var deprecatedParameters = []string{
-	"penalize_newline",
-	"low_vram",
-	"f16_kv",
-	"logits_all",
-	"vocab_only",
-	"use_mlock",
-	"mirostat",
-	"mirostat_tau",
-	"mirostat_eta",
-}
+var deprecatedParameters = []string{"penalize_newline"}
 
 // CreateRequest creates a new *api.CreateRequest from an existing Modelfile
 func (f Modelfile) CreateRequest(relativeDir string) (*api.CreateRequest, error) {
@@ -149,27 +139,9 @@ func fileDigestMap(path string) (map[string]string, error) {
 
 	var files []string
 	if fi.IsDir() {
-		fs, err := filesForModel(path)
+		files, err = filesForModel(path)
 		if err != nil {
 			return nil, err
-		}
-
-		for _, f := range fs {
-			f, err := filepath.EvalSymlinks(f)
-			if err != nil {
-				return nil, err
-			}
-
-			rel, err := filepath.Rel(path, f)
-			if err != nil {
-				return nil, err
-			}
-
-			if !filepath.IsLocal(rel) {
-				return nil, fmt.Errorf("insecure path: %s", rel)
-			}
-
-			files = append(files, f)
 		}
 	} else {
 		files = []string{path}
@@ -243,11 +215,11 @@ func filesForModel(path string) ([]string, error) {
 			return nil, err
 		}
 
-		for _, match := range matches {
-			if ct, err := detectContentType(match); err != nil {
+		for _, safetensor := range matches {
+			if ct, err := detectContentType(safetensor); err != nil {
 				return nil, err
 			} else if ct != contentType {
-				return nil, fmt.Errorf("invalid content type: expected %s for %s", ct, match)
+				return nil, fmt.Errorf("invalid content type: expected %s for %s", ct, safetensor)
 			}
 		}
 

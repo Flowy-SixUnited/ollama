@@ -15,7 +15,6 @@ import (
 type GGML struct {
 	container
 	model
-	Length int64
 }
 
 type model interface {
@@ -37,12 +36,12 @@ func (kv KV) ParameterCount() uint64 {
 	return keyValue(kv, "general.parameter_count", uint64(0))
 }
 
-func (kv KV) FileType() FileType {
+func (kv KV) FileType() fileType {
 	if t := kv.Uint("general.file_type"); t > 0 {
-		return FileType(t)
+		return fileType(t)
 	}
 
-	return FileTypeUnknown
+	return fileTypeUnknown
 }
 
 func (kv KV) BlockCount() uint64 {
@@ -126,8 +125,6 @@ func (kv KV) OllamaEngineRequired() bool {
 		"gemma3",
 		"mistral3",
 		"llama4",
-		"mllama",
-		"qwen25vl",
 	}, kv.Architecture())
 }
 
@@ -152,7 +149,7 @@ func keyValue[T valueTypes | arrayValueTypes](kv KV, key string, defaultValue ..
 		return val.(T)
 	}
 
-	slog.Debug("key not found", "key", key, "default", defaultValue[0])
+	slog.Warn("key not found", "key", key, "default", defaultValue[0])
 	return defaultValue[0]
 }
 
@@ -229,11 +226,7 @@ func (t Tensor) block() (n int) {
 }
 
 func (t Tensor) blockSize() uint64 {
-	return (TensorType)(t.Kind).BlockSize()
-}
-
-func (t TensorType) BlockSize() uint64 {
-	switch t {
+	switch t.Kind {
 	case
 		0,  // F32
 		1,  // F16
@@ -259,77 +252,73 @@ func (t TensorType) BlockSize() uint64 {
 }
 
 func (t Tensor) typeSize() uint64 {
-	return TensorType(t.Kind).TypeSize()
-}
+	blockSize := t.blockSize()
 
-func (t TensorType) TypeSize() uint64 {
-	blockSize := t.BlockSize()
-
-	switch t {
-	case TensorTypeF32:
+	switch t.Kind {
+	case 0: // FP32
 		return 4
-	case TensorTypeF16:
+	case 1: // FP16
 		return 2
-	case TensorTypeQ4_0:
+	case 2: // Q4_0
 		return 2 + blockSize/2
-	case TensorTypeQ4_1:
+	case 3: // Q4_1
 		return 2 + 2 + blockSize/2
-	case TensorTypeQ5_0:
+	case 6: // Q5_0
 		return 2 + 4 + blockSize/2
-	case TensorTypeQ5_1:
+	case 7: // Q5_1
 		return 2 + 2 + 4 + blockSize/2
-	case TensorTypeQ8_0:
+	case 8: // Q8_0
 		return 2 + blockSize
-	case TensorTypeQ8_1:
+	case 9: // Q8_1
 		return 2 + 2 + blockSize
-	case TensorTypeQ2_K:
+	case 10: // Q2_K
 		return blockSize/16 + blockSize/4 + 2 + 2
-	case TensorTypeQ3_K:
+	case 11: // Q3_K
 		return blockSize/8 + blockSize/4 + 12 + 2
-	case TensorTypeQ4_K:
+	case 12: // Q4_K
 		return 2 + 2 + 12 + blockSize/2
-	case TensorTypeQ5_K:
+	case 13: // Q5_K
 		return 2 + 2 + 12 + blockSize/8 + blockSize/2
-	case TensorTypeQ6_K:
+	case 14: // Q6_K
 		return blockSize/2 + blockSize/4 + blockSize/16 + 2
-	case TensorTypeQ8_K:
+	case 15: // Q8_K
 		return 4 + blockSize + 2*blockSize/16
-	case tensorTypeIQ2_XXS:
+	case 16: // IQ2_XXS
 		return 2 + 2*blockSize/8
-	case tensorTypeIQ2_XS:
+	case 17: // IQ2_XS
 		return 2 + 2*blockSize/8 + blockSize/32
-	case tensorTypeIQ3_XXS:
+	case 18: // IQ3_XXS
 		return 2 + blockSize/4 + blockSize/8
-	case tensorTypeIQ1_S:
+	case 19: // IQ1_S
 		return 2 + blockSize/8 + blockSize/16
-	case tensorTypeIQ4_NL:
+	case 20: // IQ4_NL
 		return 2 + blockSize/2
-	case tensorTypeIQ3_S:
+	case 21: // IQ3_S
 		return 2 + blockSize/4 + blockSize/8 + blockSize/32 + 4
-	case tensorTypeIQ2_S:
+	case 22: // IQ2_S
 		return 2 + blockSize/4 + blockSize/16
-	case tensorTypeIQ4_XS:
+	case 23: // IQ4_XS
 		return 2 + 2 + blockSize/2 + blockSize/64
-	case TensorTypeI8:
+	case 24: // I8
 		return 1
-	case TensorTypeI16:
+	case 25: // I16
 		return 2
-	case TensorTypeI32:
+	case 26: // I32
 		return 4
-	case TensorTypeI64:
+	case 27: // I64
 		return 8
-	case TensorTypeF64:
+	case 28: // F64
 		return 8
-	case tensorTypeIQ1_M:
+	case 29: // IQ1_M
 		return blockSize/8 + blockSize/16 + blockSize/32
-	case TensorTypeBF16:
+	case 30: // BF16
 		return 2
 	default:
 		return 0
 	}
 }
 
-func (t Tensor) Elements() uint64 {
+func (t Tensor) parameters() uint64 {
 	var count uint64 = 1
 	for _, n := range t.Shape {
 		count *= n
@@ -338,11 +327,11 @@ func (t Tensor) Elements() uint64 {
 }
 
 func (t Tensor) Size() uint64 {
-	return t.Elements() * t.typeSize() / t.blockSize()
+	return t.parameters() * t.typeSize() / t.blockSize()
 }
 
 func (t Tensor) Type() string {
-	return TensorType(t.Kind).String()
+	return fileType(t.Kind).String()
 }
 
 type container interface {
@@ -387,12 +376,12 @@ func DetectContentType(b []byte) string {
 //
 // It collects array values for arrays with a size less than or equal to
 // maxArraySize. If the maxArraySize is negative, all arrays are collected.
-func Decode(rs io.ReadSeeker, maxArraySize int) (*GGML, error) {
+func Decode(rs io.ReadSeeker, maxArraySize int) (*GGML, int64, error) {
 	rs = bufioutil.NewBufferedSeeker(rs, 32<<10)
 
 	var magic uint32
 	if err := binary.Read(rs, binary.LittleEndian, &magic); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	var c container
@@ -402,25 +391,24 @@ func Decode(rs io.ReadSeeker, maxArraySize int) (*GGML, error) {
 	case FILE_MAGIC_GGUF_BE:
 		c = &containerGGUF{ByteOrder: binary.BigEndian, maxArraySize: maxArraySize}
 	default:
-		return nil, errors.New("invalid file magic")
+		return nil, 0, errors.New("invalid file magic")
 	}
 
 	model, err := c.Decode(rs)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	offset, err := rs.Seek(0, io.SeekCurrent)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	// final model type
 	return &GGML{
 		container: c,
 		model:     model,
-		Length:    offset,
-	}, nil
+	}, offset, nil
 }
 
 func (f GGML) GraphSize(context, batch uint64, numParallel int, kvCacheType string) (kv []uint64, partialOffload, fullOffload uint64) {
@@ -492,7 +480,7 @@ func (f GGML) GraphSize(context, batch uint64, numParallel int, kvCacheType stri
 		var ropeFreqsCount uint64
 		if ropeFreqs, ok := f.Tensors().GroupLayers()["rope_freqs"]; ok {
 			if ropeFreqsWeights, ok := ropeFreqs["weights"]; ok {
-				ropeFreqsCount = ropeFreqsWeights.Elements()
+				ropeFreqsCount = ropeFreqsWeights.parameters()
 			}
 		}
 
@@ -652,20 +640,6 @@ func (llm GGML) VisionGraphSize() (weights, graphSize uint64) {
 		graphSize = 4 * (imageSize*imageSize*numChannels +
 			embeddingLength*patchSize +
 			numPatches*numPatches*headCount)
-	case "qwen25vl":
-		maxPixels := uint64(llm.KV().Uint("vision.max_pixels", 28*28*1280))
-
-		numPatches := maxPixels / (patchSize * patchSize)
-
-		graphSize = 4 * (maxPixels*numChannels + // Original image storage
-			// Normalized pixels
-			maxPixels*numChannels +
-			// Patches storage (numPatches * channels * patchSize^2)
-			numPatches*numChannels*patchSize*patchSize +
-			// Self-attention calculations
-			numPatches*numPatches*headCount +
-			// Additional buffer for processing
-			embeddingLength*numPatches)
 	case "llama4":
 		// vision graph is computed independently in the same schedule
 		// and is negligible compared to the worst case text graph

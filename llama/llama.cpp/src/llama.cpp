@@ -4,7 +4,6 @@
 #include "llama-mmap.h"
 #include "llama-vocab.h"
 #include "llama-model-loader.h"
-#include "llama-model-saver.h"
 #include "llama-model.h"
 
 #include "ggml.h"
@@ -254,13 +253,6 @@ struct llama_model * llama_model_load_from_splits(
     return llama_model_load_from_file_impl(splits.front(), splits, params);
 }
 
-void llama_model_save_to_file(const struct llama_model * model, const char * path_model) {
-    llama_model_saver ms(*model);
-    ms.add_kv_from_model();
-    ms.add_tensors_from_model();
-    ms.save(path_model);
-}
-
 //
 // chat templates
 //
@@ -346,4 +338,3 @@ const char * llama_print_system_info(void) {
 
     return s.c_str();
 }
-

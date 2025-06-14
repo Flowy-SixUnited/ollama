@@ -64,7 +64,7 @@ func formatDuration(d time.Duration) string {
 func (b *Bar) String() string {
 	termWidth, _, err := term.GetSize(int(os.Stderr.Fd()))
 	if err != nil {
-		termWidth = defaultTermWidth
+		termWidth = 80
 	}
 
 	var pre strings.Builder
